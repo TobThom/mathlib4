@@ -6,11 +6,12 @@ Authors: Tomas Skrivan
 import Std.Data.RBMap.Alter
 
 import Mathlib.Tactic.FunProp.Decl
+import Mathlib.Tactic.FunProp.Types
 import Mathlib.Tactic.FunProp.FunctionData
 import Mathlib.Tactic.FunProp.RefinedDiscrTree
 
 /-!
-## `fun_prop` enviroment extensions storing thorems for `fun_prop`
+## `fun_prop` environment extensions storing theorems for `fun_prop`
 -/
 
 namespace Mathlib
@@ -36,19 +37,21 @@ inductive LambdaTheoremArgs
   | proj (x Y : Nat)
   | projDep (x Y : Nat)
   | comp (f g : Nat)
+  | letE (f g : Nat)
   | pi (f : Nat)
   deriving Inhabited, BEq, Repr, Hashable
 
 /-- There are 5(+1) basic lambda theorems
 
-- id      `Continous fun x => x`
-- const   `Continous fun x => y`
-- proj    `Continous fun (f : X → Y) => f x`
-- projDep `Continous fun (f : (x : X) → Y x => f x)`
-- comp    `Continous f → Continous g → Continous fun x => f (g x)`
-- pi      `∀ y, Continuous (f · y) → Continous fun x y => f x y` -/
+- id      `Continuous fun x => x`
+- const   `Continuous fun x => y`
+- proj    `Continuous fun (f : X → Y) => f x`
+- projDep `Continuous fun (f : (x : X) → Y x => f x)`
+- comp    `Continuous f → Continuous g → Continuous fun x => f (g x)`
+- letE    `Continuous f → Continuous g → Continuous fun x => let y := g x; f x y`
+- pi      `∀ y, Continuous (f · y) → Continuous fun x y => f x y` -/
 inductive LambdaTheoremType
-  | id  | const | proj| projDep | comp  | pi
+  | id  | const | proj| projDep | comp | letE  | pi
   deriving Inhabited, BEq, Repr, Hashable
 
 /-- -/
@@ -59,6 +62,7 @@ def LambdaTheoremArgs.type (t : LambdaTheoremArgs) : LambdaTheoremType :=
   | .proj .. => .proj
   | .projDep .. => .projDep
   | .comp .. => .comp
+  | .letE .. => .letE
   | .pi .. => .pi
 
 set_option linter.unusedVariables false in
@@ -99,6 +103,11 @@ def detectLambdaTheoremArgs (f : Expr) (ctxVars : Array Expr) :
       let .some argId_f := ctxVars.findIdx? (fun x => x == (.fvar fId)) | return none
       let .some argId_g := ctxVars.findIdx? (fun x => x == (.fvar gId)) | return none
       return .some <| .comp argId_f argId_g
+    | .letE yName yType (.app (.fvar gId) (.bvar 0))
+                        (.app (.app (.fvar fId) (.bvar 1)) (.bvar 0)) dep =>
+      let .some argId_f := ctxVars.findIdx? (fun x => x == (.fvar fId)) | return none
+      let .some argId_g := ctxVars.findIdx? (fun x => x == (.fvar gId)) | return none
+      return .some <| .letE argId_f argId_g
     | .lam Name yType (.app (.app (.fvar fId) (.bvar 1)) (.bvar 0)) yBi =>
       -- fun x y => f x y
       let .some argId_f := ctxVars.findIdx? (fun x => x == (.fvar fId)) | return none
@@ -164,15 +173,14 @@ inductive TheoremForm where
   | uncurried | comp
   deriving Inhabited, BEq, Repr
 
-
-/-- theorem about specific function (eiter declared constant or free variable) -/
+/-- theorem about specific function (either declared constant or free variable) -/
 structure FunctionTheorem where
   /-- function property name -/
   funPropName : Name
   /-- theorem name -/
-  thmName   : Name
+  thmOrigin   : Origin
   /-- function name -/
-  funName   : Name
+  funOrigin   : Origin
   /-- array of argument indices about which this theorem is about -/
   mainArgs  : Array Nat
   /-- total number of arguments applied to the function  -/
@@ -182,7 +190,6 @@ structure FunctionTheorem where
   /-- form of the theorem, see documentation of TheoremForm -/
   form : TheoremForm
   deriving Inhabited, BEq
-
 
 private local instance : Ord Name := ⟨Name.quickCmp⟩
 
@@ -195,7 +202,9 @@ structure FunctionTheorems where
 
 /-- return proof of function theorem -/
 def FunctionTheorem.getProof (thm : FunctionTheorem) : MetaM Expr := do
-  mkConstWithFreshMVarLevels thm.thmName
+  match thm.thmOrigin with
+  | .decl name => mkConstWithFreshMVarLevels name
+  | .fvar id => return .fvar id
 
 
 /-- -/
@@ -209,7 +218,7 @@ initialize functionTheoremsExt : FunctionTheoremsExt ←
     addEntry := fun d e =>
       {d with
         theorems :=
-          d.theorems.alter e.funName fun funProperties =>
+          d.theorems.alter e.funOrigin.name fun funProperties =>
             let funProperties := funProperties.getD {}
             funProperties.alter e.funPropName fun thms =>
               let thms := thms.getD #[]
@@ -232,7 +241,7 @@ structure GeneralTheorem where
   funPropName   : Name
   /-- theorem name -/
   thmName     : Name
-  /-- discreminatory tree keys used to index this theorem -/
+  /-- discrimination tree keys used to index this theorem -/
   keys        : List RefinedDiscrTree.DTExpr
   /-- priority -/
   priority    : Nat  := eval_prio default
@@ -278,13 +287,13 @@ initialize morTheoremsExt : GeneralTheoremsExt ←
 - lam - theorem about basic lambda calculus terms
 - function - theorem about a specific function(declared or free variable) in specific arguments
 - mor - special theorems talking about bundled morphisms/DFunLike.coe
-- transition - theorems infering one function property from another
+- transition - theorems inferring one function property from another
 
 Examples:
 - lam
 ```
-  theorem Continuous_id : Continous fun x => x
-  theorem Continuous_comp (hf : Continuous f) (hg : Continuous g) : Continous fun x => f (g x)
+  theorem Continuous_id : Continuous fun x => x
+  theorem Continuous_comp (hf : Continuous f) (hg : Continuous g) : Continuous fun x => f (g x)
 ```
 - function
 ```
@@ -302,7 +311,7 @@ Examples:
 - transition - the conclusion has to be in the form `P f` where `f` is a free variable
 ```
   theorem linear_is_continuous [FiniteDimensional ℝ E] {f : E → F} (hf : IsLinearMap 𝕜 f) :
-      Conttinuous f
+      Continuous f
 ```
 -/
 inductive Theorem where
@@ -321,28 +330,31 @@ def getTheoremFromConst (declName : Name) (prio : Nat := eval_prio default) : Me
       | throwError "unrecognized function property `{← ppExpr b}`"
     let funPropName := decl.funPropName
 
-    if let .some thmArgs ← detectLambdaTheoremArgs f xs then
+    let fData? ← getFunctionData? f defaultUnfoldPred {zeta:=false}
+
+    if let .some thmArgs ← detectLambdaTheoremArgs (← fData?.get) xs then
       return .lam {
         funPropName := funPropName
         thmName := declName
         thmArgs := thmArgs
       }
 
-    let fData ← getFunctionData f
+    let .data fData := fData?
+      | throwError s!"function in invalid form {← ppExpr f}"
 
     match fData.fn with
     | .const funName _ =>
 
-      let .some (f',_) ← splitMorToComp f
-        | throwError s!"fun_prop bug: failed at detecting theorem type `{← ppExpr b}`"
-
-      let form : TheoremForm := if (← isDefEq f' f) then .uncurried else .comp
+      -- todo: more robust detection of compositional and uncurried form!!!
+      -- I think this detects `Continuous fun x => x + c` as compositional ...
+      let dec ← fData.nontrivialDecomposition
+      let form : TheoremForm := if dec.isSome || funName == ``Prod.mk then .comp else .uncurried
 
       return .function {
 -- funPropName funName fData.mainArgs fData.args.size thmForm
         funPropName := funPropName
-        thmName := declName
-        funName := funName
+        thmOrigin := .decl declName
+        funOrigin := .decl funName
         mainArgs := fData.mainArgs
         appliedArgs := fData.args.size
         priority := prio
@@ -350,19 +362,24 @@ def getTheoremFromConst (declName : Name) (prio : Nat := eval_prio default) : Me
       }
     | .fvar .. =>
       let (_,_,b') ← forallMetaTelescope info.type
-      let keys := ← RefinedDiscrTree.mkDTExprs b'
+      let keys := ← RefinedDiscrTree.mkDTExprs b' {} false
       let thm : GeneralTheorem := {
         funPropName := funPropName
         thmName := declName
         keys    := keys
         priority  := prio
       }
-      -- todo: maybe do a little bit more caraful detection of morphism and transition theorems
-      let lastArg := fData.args[fData.args.size-1]!
-      if lastArg.coe.isSome then
-        return .mor thm
-      else
-        return .transition thm
+      -- todo: maybe do a little bit more careful detection of morphism and transition theorems
+      match (← fData.isMorApplication) with
+      | .exact => return .mor thm
+      | .underApplied | .overApplied =>
+        throwError "fun_prop theorem about morphism coercion has to be in fully applied form"
+      | .none =>
+        if fData.fn.isFVar && (fData.args.size == 1) &&
+           (fData.args[0]!.expr == fData.mainVar) then
+          return .transition thm
+
+        throwError "Not a valid `fun_prop` theorem!"
     | _ =>
       throwError "unrecognized theoremType `{← ppExpr b}`"
 
@@ -379,9 +396,9 @@ type: {repr thm.thmArgs.type}"
     lambdaTheoremsExt.add thm attrKind
   | .function thm =>
     trace[Meta.Tactic.fun_prop.attr] "\
-function theorem: {thm.thmName}
+function theorem: {thm.thmOrigin.name}
 function property: {thm.funPropName}
-function name: {thm.funName}
+function name: {thm.funOrigin.name}
 main arguments: {thm.mainArgs}
 applied arguments: {thm.appliedArgs}
 form: {repr thm.form}"
